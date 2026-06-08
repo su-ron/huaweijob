@@ -32,12 +32,9 @@ Action 注册代码（`PlatformActions.xml:884`）：
 ```xml
 <idea-plugin>
   <actions>
-    <!-- 从原位置移除 -->
     <group id="HelpMenu">
       <remove id="CollectZippedLogs"/>
     </group>
-
-    <!-- 注册到 ShowLog 下方 -->
     <action id="CollectZippedLogs"
             class="com.intellij.ide.actions.CollectZippedLogsAction">
       <add-to-group group-id="HelpMenu"
@@ -92,9 +89,7 @@ public final class ShowMemoryDialogAction extends AnAction implements DumbAware 
 
 ### 修复方案
 
-#### 方案 A（推荐）：通过 ActionManager 委派调用
-
-不直接实例化 `EditMemorySettingsDialog`，而是调用系统已有的 action：
+#### 方案 A（推荐）：Wrapper 类 + ActionManager 委派
 
 ```java
 package com.huawei.deveco.projectmgmt.ohos.actions;
@@ -105,6 +100,7 @@ public class OhosShowMemoryDialogAction extends AnAction implements DumbAware {
 
     @Override
     public void actionPerformed(@NotNull AnActionEvent e) {
+        // ① 委派给系统 action 执行实际逻辑
         AnAction action = ActionManager.getInstance()
             .getAction("performancePlugin.ShowMemoryDialogAction");
         if (action != null) {
@@ -114,6 +110,7 @@ public class OhosShowMemoryDialogAction extends AnAction implements DumbAware {
 
     @Override
     public void update(@NotNull AnActionEvent e) {
+        // ② 先让系统 action 判断 enabled/visible
         AnAction action = ActionManager.getInstance()
             .getAction("performancePlugin.ShowMemoryDialogAction");
         if (action != null) {
@@ -121,6 +118,11 @@ public class OhosShowMemoryDialogAction extends AnAction implements DumbAware {
         } else {
             e.getPresentation().setEnabledAndVisible(false);
         }
+
+        // ③ 再设自定义文本（覆盖系统默认文本）
+        e.getPresentation().setText(
+            ProjectMgmtBundle.message("action.ShowMemoryDialogActionAction.text")
+        );
     }
 
     @Override
@@ -130,68 +132,73 @@ public class OhosShowMemoryDialogAction extends AnAction implements DumbAware {
 }
 ```
 
-#### 方案 B：直接在 plugin.xml 中引用系统 Action 类
-
-如果只是改变位置和图标，不需要自己写类：
-
-```xml
-<action id="ohos.ShowMemoryDialog"
-        class="com.intellij.diagnostic.ShowMemoryDialogAction"
-        text="Show Memory Dialog"
-        icon="/icons/myIcon.svg">
-  <add-to-group group-id="YourGroupId" anchor="first"/>
-</action>
-```
-
-#### 方案 C（不推荐）：反射调用
-
-```java
-Class<?> clazz = Class.forName("com.intellij.diagnostic.EditMemorySettingsDialog");
-Object dialog = clazz.getDeclaredConstructor().newInstance();
-clazz.getMethod("show").invoke(dialog);
-```
-
-**缺点**：脆弱、不类型安全、可能在 future 版本中无声崩溃。
+**关键技巧**：先委托 `action.update(e)` 获取正确的 `enabledAndVisible` 状态，再 `setText(...)` 覆盖为你自己的文本。
 
 ---
 
-## 方案对比总结
+#### 方案 B：在 plugin.xml 中引用 Wrapper 类并定位
 
-| 方案 | 代码量 | 稳定性 | 推荐度 |
-|------|--------|--------|--------|
-| A: ActionManager 委派 | 约 20 行 | 高（使用公开 API） | ⭐⭐⭐⭐⭐ |
-| B: XML 直接引用 | 0 行 Java | 高 | ⭐⭐⭐⭐⭐ |
-| C: 反射调用 | 3 行 | 低（无编译检查） | ⭐ |
-
----
-
-## 完整 plugin.xml 示例
-
-将两个 action 一起移动到 `ShowLog` 下方：
+Wrapper 类的注册和定位语法与普通 action **完全一致**：
 
 ```xml
 <idea-plugin>
   <actions>
-    <!-- ShowMemoryDialog → ShowLog 下方 -->
-    <group id="HelpMenu">
-      <remove id="performancePlugin.ShowMemoryDialogAction"/>
-    </group>
-    <action id="performancePlugin.ShowMemoryDialogAction"
-            class="com.intellij.diagnostic.ShowMemoryDialogAction">
+    <action id="ohos.ShowMemoryDialog"
+            class="com.huawei.deveco.projectmgmt.ohos.actions.OhosShowMemoryDialogAction"
+            text="Show Memory Dialog"
+            icon="/icons/memory.svg">
+      <!-- ★ 标准定位语法，和普通 action 完全一样 -->
       <add-to-group group-id="HelpMenu"
                     anchor="after"
                     relative-to-action="ShowLog"/>
     </action>
 
-    <!-- CollectZippedLogs → ShowMemoryDialog 下方 -->
-    <group id="HelpMenu">
-      <remove id="CollectZippedLogs"/>
-    </group>
-    <action id="CollectZippedLogs"
+    <!-- 也可以把 CollectZippedLogs 也一并移过来 -->
+    <action id="ohos.CollectZippedLogs"
+            class="com.intellij.ide.actions.CollectZippedLogsAction"
+            text="Collect Logs">
+      <add-to-group group-id="HelpMenu"
+                    anchor="after"
+                    relative-to-action="ohos.ShowMemoryDialog"/>
+    </action>
+  </actions>
+</idea-plugin>
+```
+
+**注意**：XML 的 `text` 属性会被 Wrapper 的 `update()` 中 `setText(...)` 覆盖，所以最终的文本以代码为准。
+
+---
+
+## 方案对比总结
+
+| 方案 | 文本控制 | enabled/visible 逻辑 | 内部 API 依赖 | 推荐度 |
+|------|---------|---------------------|--------------|--------|
+| A: Wrapper + ActionManager | ✅ 完全控制 | ✅ 复用系统逻辑 | ✅ 只通过 `ActionManager` | ⭐⭐⭐⭐⭐ |
+| B: XML 直接引用系统类 | ✅ 可设 text | ✅ 复用系统 update | ⚠️ `@ApiStatus.Internal` | ⭐⭐⭐ |
+
+---
+
+## 完整 plugin.xml 示例
+
+```xml
+<idea-plugin>
+  <actions>
+    <!-- ShowLog 保持原位 -->
+
+    <!-- Wrapper：自定义文本 + 定位到 ShowLog 下方 -->
+    <action id="ohos.ShowMemoryDialog"
+            class="com.huawei.deveco.projectmgmt.ohos.actions.OhosShowMemoryDialogAction">
+      <add-to-group group-id="HelpMenu"
+                    anchor="after"
+                    relative-to-action="ShowLog"/>
+    </action>
+
+    <!-- CollectZippedLogs 定位到 ShowMemoryDialog 下方 -->
+    <action id="ohos.CollectZippedLogs"
             class="com.intellij.ide.actions.CollectZippedLogsAction">
       <add-to-group group-id="HelpMenu"
                     anchor="after"
-                    relative-to-action="performancePlugin.ShowMemoryDialogAction"/>
+                    relative-to-action="ohos.ShowMemoryDialog"/>
     </action>
   </actions>
 </idea-plugin>
